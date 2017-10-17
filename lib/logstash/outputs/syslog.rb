@@ -59,6 +59,9 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
   # syslog server protocol. you can choose between UDP, TCP, or TLS over TCP
   config :protocol, :validate => ["tcp", "udp", "tls-tcp"], :default => "udp"
 
+  # Verify the identity of the other end of the SSL connection.
+  config :ssl_verify, :validate => :boolean, :default => true
+
   # facility label for syslog message
   config :facility, :validate => FACILITY_LABELS, :required => true
 
@@ -100,21 +103,51 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
   private
   def connect
     @client_socket.close rescue nil if @client_socket
+
     if @protocol == 'udp'
-        @client_socket = UDPSocket.new
-        @client_socket.connect(@host, @port)
+      @client_socket = UDPSocket.new
+      @client_socket.connect(@host, @port)
     else
-        @client_socket = TCPSocket.new(@host, @port)
-        if @protocol == 'tls-tcp'
-            ssl = OpenSSL::SSL::SSLContext.new
-            ssl.verify_mode = OpenSSL::SSL::VERIFY_PEER
-            cert_store = OpenSSL::X509::Store.new
-            cert_store.set_default_paths
-            ssl.cert_store = cert_store
-            @client_socket = OpenSSL::SSL::SSLSocket.new(@client_socket, ssl)
-            @client_socket.sync_close = true
+      @client_socket = TCPSocket.new(@host, @port)
+
+      if @protocol == 'tls-tcp'
+        ssl = OpenSSL::SSL::SSLContext.new
+        if @ssl_verify
+          cert_store = OpenSSL::X509::Store.new
+          cert_store.set_default_paths
+          ssl.cert_store = cert_store
+          ssl.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        else
+          ssl.verify_mode = OpenSSL::SSL::VERIFY_NONE
         end
-        @client_socket.connect
+        @client_socket = OpenSSL::SSL::SSLSocket.new(@client_socket, ssl)
+        @client_socket.sync_close = true
+      end
+
+      @client_socket.connect
+    end
+  end
+
+  private
+  def drain_socket(socket)
+    readable, = IO.select([socket], [], [], 0)
+    return unless readable && readable.any?
+
+    loop do
+      begin
+        ret = socket.read_nonblock(1024)
+      rescue IO::WaitReadable, IO::WaitWritable
+        # We're done draining: either there is nothing else to read, or we have
+        # a new handshake to finish (which would presumably complete once we
+        # write later on).
+        return
+      rescue EOFError
+        # NOTE: This is actually what we're trying to trigger here.
+        raise
+      else
+        m = "Unexpected read from #{@protocol} syslog socket: #{ret}"
+        @logger.warn(m, :host => @host, :port => @port)
+      end
     end
   end
 
@@ -146,6 +179,12 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
       begin
         now = Time.now
         connect unless @client_socket && (now - @last_message_sent) < @timeout
+        # OpenSSL will not warn us of EOF (due to a connection reset) when we
+        # write to the socket, so we check if the connection is readable, and
+        # if so drain it (in practice, we're trying to get it to throw an EOF:
+        # syslog does not have acks so we don't expect to read anything from
+        # this connection if it's up and running).
+        drain_socket(@client_socket)
         @client_socket.write(syslog_msg + "\n")
         @last_message_sent = now
         return
