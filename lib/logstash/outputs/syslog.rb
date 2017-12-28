@@ -62,6 +62,8 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
   # Verify the identity of the other end of the SSL connection.
   config :ssl_verify, :validate => :boolean, :default => true
 
+  config :ssl_version, :validate => :string
+
   # facility label for syslog message
   config :facility, :validate => FACILITY_LABELS, :required => true
 
@@ -120,6 +122,9 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
         else
           ssl.verify_mode = OpenSSL::SSL::VERIFY_NONE
         end
+
+        ssl.ssl_version = @ssl_version.to_sym if @ssl_version
+
         @client_socket = OpenSSL::SSL::SSLSocket.new(@client_socket, ssl)
         @client_socket.sync_close = true
       end
