@@ -6,7 +6,8 @@ describe LogStash::Outputs::Syslog do
     plugin = LogStash::Plugin.lookup('output', 'syslog').new(
       'host' => @host, 'port' => @port,
       'facility' => 'user-level', 'severity' => 'informational',
-      'protocol' => protocol, 'ssl_verify' => ssl_verify
+      'protocol' => protocol, 'ssl_verify' => ssl_verify,
+      'ssl_version' => ssl_version
     )
     plugin.register
     plugin
@@ -15,6 +16,7 @@ describe LogStash::Outputs::Syslog do
   context 'tls-tcp' do
     let(:protocol) { 'tls-tcp' }
     let(:queue) { Queue.new }
+    let(:ssl_version) { :TLSv1_1 }
 
     before(:all) do
       name = OpenSSL::X509::Name.new.add_entry('CN', '127.0.0.1')
@@ -34,6 +36,7 @@ describe LogStash::Outputs::Syslog do
       tcp_server = TCPServer.new('127.0.0.1', 0)
 
       ssl_ctx = OpenSSL::SSL::SSLContext.new
+      ssl_ctx.ssl_version = :TLSv1_1
       ssl_ctx.cert = @crt
       ssl_ctx.key = @key
       ssl_server = OpenSSL::SSL::SSLServer.new(tcp_server, ssl_ctx)
@@ -122,26 +125,59 @@ describe LogStash::Outputs::Syslog do
 
           Timeout.timeout(5) { 10.times { queue.pop } }
         end
+
+        context 'with an incompatible SSL version (SSLv3 -> TLSv1.1)' do
+          let(:ssl_version) { :SSLv3 }
+
+          it 'fails' do
+            e = LogStash::Event.new('message' => 'm1', 'host' => 'h1')
+            subject.receive(e)
+
+            m = queue.pop
+            expect(m).to be_a(OpenSSL::SSL::SSLError)
+            expect(m.message).to match(/fatal alert/i)
+          end
+        end
+
+        context 'with an incompatible SSL version (TLSv1.2 -> TLSv1.1)' do
+          let(:ssl_version) { :TLSv1_2 }
+
+          it 'fails' do
+            e = LogStash::Event.new('message' => 'm1', 'host' => 'h1')
+            subject.receive(e)
+
+            m = queue.pop
+            expect(m).to be_a(OpenSSL::SSL::SSLError)
+            expect(m.message).to match(/fatal alert/i)
+          end
+        end
+
+        context 'without SSL version' do
+          let(:ssl_version) { nil }
+
+          it 'connects' do
+            e = LogStash::Event.new('message' => 'm1', 'host' => 'h1')
+            subject.receive(e)
+
+            m = queue.pop
+            puts m.inspect
+            expect(m).to match(/h1.*m1/i)
+          end
+        end
       end
     end
 
     context 'with SSL verification' do
       let(:ssl_verify) { true }
 
-      it 'does not connect' do
+      it 'does not connect to a server with an invalid cert' do
         20.times do |i|
           e = LogStash::Event.new('message' => "m#{i}", 'host' => 'h1')
           subject.receive(e)
-        end
 
-        loop do
-          begin
-            m = queue.pop(true)
-          rescue ThreadError
-            break
-          else
-            expect(m).to be_a(OpenSSL::SSL::SSLError)
-          end
+          m = queue.pop
+          expect(m).to be_a(OpenSSL::SSL::SSLError)
+          expect(m.message).to match(/fatal alert.*certificate_unknown/i)
         end
       end
     end
