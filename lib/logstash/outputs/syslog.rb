@@ -69,6 +69,8 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
   # Verify the identity of the other end of the SSL connection against the CA.
   config :ssl_verify, :validate => :boolean, :default => false
 
+  config :ssl_version, :validate => :string
+
   # The SSL CA certificate, chainfile or CA path. The system CA path is automatically included.
   config :ssl_cacert, :validate => :path
 
@@ -226,16 +228,17 @@ class LogStash::Outputs::Syslog < LogStash::Outputs::Base
   def setup_ssl
     require "openssl"
     ssl_context = OpenSSL::SSL::SSLContext.new
-    ssl_context.cert = OpenSSL::X509::Certificate.new(File.read(@ssl_cert))
-    ssl_context.key = OpenSSL::PKey::RSA.new(File.read(@ssl_key),@ssl_key_passphrase)
+    ssl_context.ssl_version = @ssl_version.to_sym if @ssl_version
     if @ssl_verify
       cert_store = OpenSSL::X509::Store.new
       # Load the system default certificate path to the store
       cert_store.set_default_paths
-      if File.directory?(@ssl_cacert)
-        cert_store.add_path(@ssl_cacert)
-      else
-        cert_store.add_file(@ssl_cacert)
+      if @ssl_cacert
+        if File.directory?(@ssl_cacert)
+          cert_store.add_path(@ssl_cacert)
+        else
+          cert_store.add_file(@ssl_cacert)
+        end
       end
       ssl_context.cert_store = cert_store
       ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER|OpenSSL::SSL::VERIFY_FAIL_IF_NO_PEER_CERT
